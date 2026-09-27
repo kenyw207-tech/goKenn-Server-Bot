@@ -8,9 +8,9 @@ from urllib.parse import urljoin
 import aiohttp
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
+import warnings
 warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 import json
-import warnings
 
 intents = discord.Intents.default()
 intents.members = True
