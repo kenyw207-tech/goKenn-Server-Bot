@@ -178,6 +178,38 @@ _seen_news_urls = set()
 _promos_initialized = False
 _seen_promo_ids = set()
 
+STATE_FILE = os.getenv('BOT_STATE_FILE', 'bot_state.json')
+
+
+def load_persistent_state():
+    global _seen_news_urls, _seen_promo_ids
+    try:
+        if not os.path.exists(STATE_FILE):
+            return
+        with open(STATE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        _seen_news_urls.update(data.get('seen_news_urls', []))
+        _seen_promo_ids.update(data.get('seen_promo_ids', []))
+        print(f"[ESTADO] Carregado: {len(_seen_news_urls)} notícias e {len(_seen_promo_ids)} promoções.")
+    except Exception as exc:
+        print(f"[ESTADO] Não foi possível carregar o histórico: {exc}")
+
+
+def save_persistent_state():
+    try:
+        data = {
+            'seen_news_urls': sorted(_seen_news_urls),
+            'seen_promo_ids': sorted(_seen_promo_ids),
+        }
+        temp = STATE_FILE + '.tmp'
+        with open(temp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp, STATE_FILE)
+    except Exception as exc:
+        print(f"[ESTADO] Não foi possível salvar o histórico: {exc}")
+
+
+
 
 def _clean_text(value: str) -> str:
     return ' '.join((value or '').split()).strip()
@@ -499,7 +531,7 @@ async def collect_promos(session):
 
 @tasks.loop(hours=6)
 async def game_news_loop():
-    global _news_initialized, _seen_news_urls, _promos_initialized, _seen_promo_ids
+    global _news_initialized, _seen_news_urls
     if not bot.guilds:
         return
 
@@ -514,9 +546,10 @@ async def game_news_loop():
 
             already_posted = await recent_news_urls(channel)
 
-            # Primeira execução: memoriza o que já existe para não despejar conteúdo antigo.
+            # NOTÍCIAS: publica cada matéria apenas uma vez.
             if not _news_initialized and not already_posted:
                 _seen_news_urls.update(item['url'] for item in news)
+                save_persistent_state()
             else:
                 pending_news = [
                     item for item in news
@@ -527,38 +560,61 @@ async def game_news_loop():
                     try:
                         await publish_news(channel, item)
                         _seen_news_urls.add(item['url'])
+                        save_persistent_state()
                         await asyncio.sleep(2)
                     except (discord.Forbidden, discord.HTTPException) as exc:
                         print(f'[NOTÍCIAS] Não consegui publicar: {exc}')
 
-            promo_items = [('epic', item) for item in epic] + [('steam', item) for item in steam]
-            if not _promos_initialized:
-                _seen_promo_ids.update(item['id'] for _, item in promo_items)
-            else:
-                pending_promos = [
-                    (kind, item) for kind, item in promo_items
-                    if item['id'] not in _seen_promo_ids
-                ]
-                # Evita spam: no máximo 5 promoções novas por ciclo.
-                for kind, item in pending_promos[:5]:
-                    try:
-                        if kind == 'epic':
-                            await publish_epic(channel, item)
-                        else:
-                            await publish_steam(channel, item)
-                        _seen_promo_ids.add(item['id'])
-                        await asyncio.sleep(2)
-                    except (discord.Forbidden, discord.HTTPException) as exc:
-                        print(f'[PROMOÇÕES] Não consegui publicar: {exc}')
+            # EPIC: lembrete de TODOS os jogos que continuam grátis a cada 6 horas.
+            for item in epic:
+                try:
+                    await publish_epic(channel, item)
+                    await asyncio.sleep(2)
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    print(f'[EPIC] Não consegui publicar lembrete: {exc}')
 
     _news_initialized = True
-    _promos_initialized = True
 
 
 @game_news_loop.before_loop
 async def before_game_news_loop():
     await bot.wait_until_ready()
     await asyncio.sleep(10)
+
+
+@tasks.loop(hours=24)
+async def steam_daily_loop():
+    if not bot.guilds:
+        return
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            steam = await fetch_steam_specials(session)
+            print(f'[STEAM DIÁRIO] {len(steam)} promoção(ões) >= {STEAM_MIN_DISCOUNT}%')
+        except Exception as exc:
+            print(f'[STEAM DIÁRIO] Falha ao consultar Steam: {exc}')
+            return
+
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name='📢・avisos')
+            if channel is None:
+                continue
+
+            # Resumo diário: republica as promoções que ainda estão válidas.
+            # Limite de 12 para evitar excesso de mensagens.
+            for item in steam[:12]:
+                try:
+                    await publish_steam(channel, item)
+                    await asyncio.sleep(2)
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    print(f'[STEAM DIÁRIO] Não consegui publicar: {exc}')
+
+
+@steam_daily_loop.before_loop
+async def before_steam_daily_loop():
+    await bot.wait_until_ready()
+    # Desloca o resumo diário da Steam para não sair junto do ciclo da Epic/notícias.
+    await asyncio.sleep(60)
 
 
 @bot.tree.command(name='testar-noticias', description='Testa agora as notícias de Warzone, Rocket League e Battlefield 6.')
@@ -633,8 +689,13 @@ async def testar_promocoes(interaction: discord.Interaction):
 
 @bot.event
 async def on_ready():
+    if not getattr(bot, '_persistent_state_loaded', False):
+        load_persistent_state()
+        bot._persistent_state_loaded = True
     if not game_news_loop.is_running():
         game_news_loop.start()
+    if not steam_daily_loop.is_running():
+        steam_daily_loop.start()
     bot.add_view(GameRoleView())
     total = 0
     # Registra os comandos diretamente em cada servidor para aparecerem imediatamente.
