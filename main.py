@@ -137,31 +137,46 @@ NEWS_SOURCES = [
         'include': ('warzone', 'temporada', 'season', 'patch', 'atualiza', 'evento', 'event', 'mapa', 'mode', 'modo'),
         'exclude': ('mobile', 'esports', 'endowment'),
         'color': 0x43B581,
+        'fallback_query': 'site:callofduty.com/blog Warzone',
     },
     {
         'game': 'ROCKET LEAGUE',
         'emoji': '🚗',
-        'url': 'https://www.rocketleague.com/news?lang=pt-br',
+        'url': 'https://www.rocketleague.com/news',
         'base': 'https://www.rocketleague.com',
         'path_hint': '/news/',
-        'include': ('patch', 'temporada', 'season', 'atualiza', 'update', 'evento', 'event', 'chega', 'novo', 'nova'),
+        'include': ('rocket league', 'patch', 'temporada', 'season', 'atualiza', 'update', 'evento', 'event', 'chega', 'novo', 'nova'),
         'exclude': ('rlcs', 'championship', 'major', 'world championship', 'esports'),
         'color': 0x3498DB,
+        'fallback_query': 'site:rocketleague.com/news Rocket League',
     },
     {
         'game': 'BATTLEFIELD 6',
         'emoji': '🎖️',
         'url': 'https://www.ea.com/pt-br/games/battlefield/battlefield-6/news',
         'base': 'https://www.ea.com',
-        'path_hint': '/games/battlefield/battlefield-6/news/',
-        'include': ('battlefield 6', 'temporada', 'season', 'atualiza', 'update', 'evento', 'event', 'mapa', 'map', 'community'),
-        'exclude': ('antitrapaça', 'anticheat', 'competitive', 'redsec competitivo'),
+        'path_hint': '/games/battlefield/',
+        'include': ('battlefield 6', 'battlefield', 'temporada', 'season', 'atualiza', 'update', 'evento', 'event', 'mapa', 'map', 'community'),
+        'exclude': ('competitive',),
         'color': 0xE67E22,
+        'fallback_query': 'site:ea.com/games/battlefield Battlefield 6',
     },
 ]
 
+STEAM_MIN_DISCOUNT = 50
+EPIC_PROMOTIONS_URL = (
+    'https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions'
+    '?locale=pt-BR&country=BR&allowCountries=BR'
+)
+STEAM_SPECIALS_URL = (
+    'https://store.steampowered.com/search/'
+    '?specials=1&cc=BR&l=brazilian&category1=998'
+)
+
 _news_initialized = False
 _seen_news_urls = set()
+_promos_initialized = False
+_seen_promo_ids = set()
 
 
 def _clean_text(value: str) -> str:
@@ -175,27 +190,42 @@ def _interesting(title: str, source: dict) -> bool:
     return any(word.casefold() in low for word in source['include'])
 
 
-async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
-    headers = {'User-Agent': 'Mozilla/5.0 goKenn-Discord-NewsBot/1.0'}
-    async with session.get(source['url'], headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as response:
-        response.raise_for_status()
-        html = await response.text()
+def _browser_headers():
+    return {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/151.0.0.0 Safari/537.36'
+        ),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.7',
+        'Cache-Control': 'no-cache',
+    }
 
-    soup = BeautifulSoup(html, 'html.parser')
+
+async def _fetch_google_news_fallback(session: aiohttp.ClientSession, source: dict):
+    """Fallback: busca no Google News somente resultados do domínio oficial."""
+    from urllib.parse import quote_plus
+    query = quote_plus(source['fallback_query'])
+    url = f'https://news.google.com/rss/search?q={query}&hl=pt-BR&gl=BR&ceid=BR:pt-419'
+    headers = _browser_headers()
+    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as response:
+        response.raise_for_status()
+        xml = await response.text()
+
+    soup = BeautifulSoup(xml, 'html.parser')
     found = []
     used = set()
-    for a in soup.find_all('a', href=True):
-        title = _clean_text(a.get_text(' ', strip=True))
-        href = urljoin(source['base'], a.get('href', ''))
-        if not title or source['path_hint'] not in href:
+    for item in soup.find_all('item'):
+        title_tag = item.find('title')
+        link_tag = item.find('link')
+        if not title_tag or not link_tag:
             continue
-        if href.rstrip('/') == source['url'].split('?')[0].rstrip('/'):
+        title = _clean_text(title_tag.get_text(' ', strip=True))
+        href = _clean_text(link_tag.get_text(' ', strip=True))
+        if not title or not href or href in used:
             continue
         if not _interesting(title, source):
-            continue
-        # Evita cards/links duplicados da mesma matéria.
-        href = href.split('?')[0].split('#')[0]
-        if href in used:
             continue
         used.add(href)
         found.append({'title': title[:250], 'url': href, 'source': source})
@@ -204,11 +234,51 @@ async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
     return found
 
 
+async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
+    """Tenta a página oficial; se houver 403/erro, usa fallback restrito ao domínio oficial."""
+    headers = _browser_headers()
+    try:
+        async with session.get(
+            source['url'],
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=25),
+            allow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            html = await response.text()
+
+        soup = BeautifulSoup(html, 'html.parser')
+        found = []
+        used = set()
+        for a in soup.find_all('a', href=True):
+            title = _clean_text(a.get_text(' ', strip=True))
+            href = urljoin(source['base'], a.get('href', ''))
+            if not title or source['path_hint'] not in href:
+                continue
+            if href.rstrip('/') == source['url'].split('?')[0].rstrip('/'):
+                continue
+            if not _interesting(title, source):
+                continue
+            href = href.split('?')[0].split('#')[0]
+            if href in used:
+                continue
+            used.add(href)
+            found.append({'title': title[:250], 'url': href, 'source': source})
+            if len(found) >= 8:
+                break
+        if found:
+            return found
+    except Exception as exc:
+        print(f"[NOTÍCIAS] Página direta falhou em {source['game']}: {exc}. Tentando fallback.")
+
+    return await _fetch_google_news_fallback(session, source)
+
+
 async def recent_news_urls(channel: discord.TextChannel):
     urls = set()
     try:
-        async for message in channel.history(limit=100):
-            if message.author.id != bot.user.id:
+        async for message in channel.history(limit=150):
+            if bot.user and message.author.id != bot.user.id:
                 continue
             for embed in message.embeds:
                 if embed.url:
@@ -222,58 +292,310 @@ async def publish_news(channel: discord.TextChannel, item: dict):
     source = item['source']
     embed = discord.Embed(
         title=f"{source['emoji']} {source['game']} | NOVIDADE",
-        description=f"**{item['title']}**\n\nClique no título abaixo para abrir a publicação oficial.",
+        description=f"**{item['title']}**\n\nAbra a publicação para ver os detalhes.",
         url=item['url'],
         color=source['color'],
     )
-    embed.add_field(name='🔗 Fonte oficial', value=f"[Abrir publicação]({item['url']})", inline=False)
-    embed.set_footer(text='Cod Warzone Tieki • Notícias oficiais • Sem menções')
+    embed.add_field(name='🔗 Publicação', value=f"[Abrir notícia]({item['url']})", inline=False)
+    embed.set_footer(text='Cod Warzone Tieki • Notícias • Sem menções')
     await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def fetch_epic_free_games(session: aiohttp.ClientSession):
+    headers = _browser_headers()
+    headers['Accept'] = 'application/json,text/plain,*/*'
+    async with session.get(
+        EPIC_PROMOTIONS_URL, headers=headers,
+        timeout=aiohttp.ClientTimeout(total=25)
+    ) as response:
+        response.raise_for_status()
+        data = await response.json(content_type=None)
+
+    items = []
+    elements = (
+        data.get('data', {})
+            .get('Catalog', {})
+            .get('searchStore', {})
+            .get('elements', [])
+    )
+
+    for game in elements:
+        promos = game.get('promotions') or {}
+        offers = promos.get('promotionalOffers') or []
+        if not offers:
+            continue
+
+        active = []
+        for group in offers:
+            active.extend(group.get('promotionalOffers') or [])
+        if not active:
+            continue
+
+        title = _clean_text(game.get('title', ''))
+        if not title:
+            continue
+
+        slug = game.get('productSlug') or game.get('urlSlug') or ''
+        if slug:
+            slug = slug.strip('/')
+            url = f'https://store.epicgames.com/pt-BR/p/{slug}'
+        else:
+            url = 'https://store.epicgames.com/pt-BR/free-games'
+
+        promo = active[0]
+        start = promo.get('startDate', '')
+        end = promo.get('endDate', '')
+        game_id = f"epic:{game.get('id', title)}:{start}:{end}"
+        items.append({
+            'id': game_id,
+            'title': title,
+            'url': url,
+            'end': end,
+        })
+    return items
+
+
+def _steam_price_text(node, selector):
+    el = node.select_one(selector)
+    return _clean_text(el.get_text(' ', strip=True)) if el else ''
+
+
+async def fetch_steam_specials(session: aiohttp.ClientSession):
+    headers = _browser_headers()
+    async with session.get(
+        STEAM_SPECIALS_URL, headers=headers,
+        timeout=aiohttp.ClientTimeout(total=30)
+    ) as response:
+        response.raise_for_status()
+        html = await response.text()
+
+    soup = BeautifulSoup(html, 'html.parser')
+    items = []
+    used = set()
+
+    for row in soup.select('a.search_result_row'):
+        href = (row.get('href') or '').split('?')[0]
+        title_el = row.select_one('.title')
+        discount_el = row.select_one('.discount_pct')
+        if not href or not title_el or not discount_el:
+            continue
+
+        title = _clean_text(title_el.get_text(' ', strip=True))
+        discount_text = _clean_text(discount_el.get_text(' ', strip=True))
+        try:
+            discount = int(discount_text.replace('-', '').replace('%', '').strip())
+        except ValueError:
+            continue
+
+        if discount < STEAM_MIN_DISCOUNT:
+            continue
+
+        app_id = row.get('data-ds-appid') or href
+        promo_id = f'steam:{app_id}:{discount}'
+        if promo_id in used:
+            continue
+        used.add(promo_id)
+
+        original = _steam_price_text(row, '.discount_original_price')
+        final = _steam_price_text(row, '.discount_final_price')
+        items.append({
+            'id': promo_id,
+            'title': title,
+            'url': href,
+            'discount': discount,
+            'original': original,
+            'final': final,
+        })
+        if len(items) >= 12:
+            break
+
+    return items
+
+
+async def publish_epic(channel: discord.TextChannel, item: dict):
+    description = f"**{item['title']}**\n\n💰 **GRÁTIS por tempo limitado**"
+    if item.get('end'):
+        description += f"\n⏰ Término informado pela Epic: `{item['end']}`"
+    embed = discord.Embed(
+        title='🎁 EPIC GAMES | JOGO GRÁTIS',
+        description=description,
+        url=item['url'],
+        color=0x2F3136,
+    )
+    embed.add_field(name='🔗 Resgatar', value=f"[Abrir na Epic Games]({item['url']})", inline=False)
+    embed.set_footer(text='Cod Warzone Tieki • Promoções • Sem menções')
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def publish_steam(channel: discord.TextChannel, item: dict):
+    prices = ''
+    if item.get('original') or item.get('final'):
+        prices = f"\n💵 {item.get('original', '')} → **{item.get('final', '')}**"
+    embed = discord.Embed(
+        title=f"🔥 STEAM | {item['discount']}% OFF",
+        description=f"**{item['title']}**{prices}",
+        url=item['url'],
+        color=0x1B2838,
+    )
+    embed.add_field(name='🔗 Ver promoção', value=f"[Abrir na Steam]({item['url']})", inline=False)
+    embed.set_footer(text=f'Cod Warzone Tieki • Steam ≥ {STEAM_MIN_DISCOUNT}% • Sem menções')
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def collect_news(session):
+    current = []
+    for source in NEWS_SOURCES:
+        try:
+            result = await fetch_source_news(session, source)
+            print(f"[NOTÍCIAS] {source['game']}: {len(result)} encontrada(s)")
+            current.extend(result)
+        except Exception as exc:
+            print(f"[NOTÍCIAS] Falha em {source['game']}: {exc}")
+    return current
+
+
+async def collect_promos(session):
+    epic, steam = [], []
+    try:
+        epic = await fetch_epic_free_games(session)
+        print(f'[PROMOÇÕES] Epic: {len(epic)} jogo(s) grátis encontrado(s)')
+    except Exception as exc:
+        print(f'[PROMOÇÕES] Falha na Epic: {exc}')
+    try:
+        steam = await fetch_steam_specials(session)
+        print(f'[PROMOÇÕES] Steam >= {STEAM_MIN_DISCOUNT}%: {len(steam)} promoção(ões)')
+    except Exception as exc:
+        print(f'[PROMOÇÕES] Falha na Steam: {exc}')
+    return epic, steam
 
 
 @tasks.loop(hours=6)
 async def game_news_loop():
-    global _news_initialized, _seen_news_urls
+    global _news_initialized, _seen_news_urls, _promos_initialized, _seen_promo_ids
     if not bot.guilds:
         return
 
     async with aiohttp.ClientSession() as session:
+        news = await collect_news(session)
+        epic, steam = await collect_promos(session)
+
         for guild in bot.guilds:
             channel = discord.utils.get(guild.text_channels, name='📢・avisos')
             if channel is None:
                 continue
 
             already_posted = await recent_news_urls(channel)
-            current = []
-            for source in NEWS_SOURCES:
-                try:
-                    current.extend(await fetch_source_news(session, source))
-                except Exception as exc:
-                    print(f"[NOTÍCIAS] Falha em {source['game']}: {exc}")
 
-            # Na primeira execução de uma instalação sem notícias do bot,
-            # apenas registra o conteúdo atual para não despejar notícias antigas.
+            # Primeira execução: memoriza o que já existe para não despejar conteúdo antigo.
             if not _news_initialized and not already_posted:
-                _seen_news_urls.update(item['url'] for item in current)
-                continue
+                _seen_news_urls.update(item['url'] for item in news)
+            else:
+                pending_news = [
+                    item for item in news
+                    if item['url'] not in already_posted
+                    and item['url'] not in _seen_news_urls
+                ]
+                for item in reversed(pending_news[:3]):
+                    try:
+                        await publish_news(channel, item)
+                        _seen_news_urls.add(item['url'])
+                        await asyncio.sleep(2)
+                    except (discord.Forbidden, discord.HTTPException) as exc:
+                        print(f'[NOTÍCIAS] Não consegui publicar: {exc}')
 
-            # Publica no máximo 3 novidades por ciclo, da ordem mais antiga para a mais nova.
-            pending = [item for item in current if item['url'] not in already_posted and item['url'] not in _seen_news_urls]
-            for item in reversed(pending[:3]):
-                try:
-                    await publish_news(channel, item)
-                    _seen_news_urls.add(item['url'])
-                    await asyncio.sleep(2)
-                except (discord.Forbidden, discord.HTTPException) as exc:
-                    print(f"[NOTÍCIAS] Não consegui publicar: {exc}")
+            promo_items = [('epic', item) for item in epic] + [('steam', item) for item in steam]
+            if not _promos_initialized:
+                _seen_promo_ids.update(item['id'] for _, item in promo_items)
+            else:
+                pending_promos = [
+                    (kind, item) for kind, item in promo_items
+                    if item['id'] not in _seen_promo_ids
+                ]
+                # Evita spam: no máximo 5 promoções novas por ciclo.
+                for kind, item in pending_promos[:5]:
+                    try:
+                        if kind == 'epic':
+                            await publish_epic(channel, item)
+                        else:
+                            await publish_steam(channel, item)
+                        _seen_promo_ids.add(item['id'])
+                        await asyncio.sleep(2)
+                    except (discord.Forbidden, discord.HTTPException) as exc:
+                        print(f'[PROMOÇÕES] Não consegui publicar: {exc}')
 
     _news_initialized = True
+    _promos_initialized = True
 
 
 @game_news_loop.before_loop
 async def before_game_news_loop():
     await bot.wait_until_ready()
     await asyncio.sleep(10)
+
+
+@bot.tree.command(name='testar-noticias', description='Testa agora as notícias de Warzone, Rocket League e Battlefield 6.')
+@app_commands.checks.has_permissions(administrator=True)
+async def testar_noticias(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message('Use este comando dentro do servidor.', ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    channel = discord.utils.get(interaction.guild.text_channels, name='📢・avisos')
+    if channel is None:
+        await interaction.followup.send('Não encontrei o canal 📢・avisos.', ephemeral=True)
+        return
+
+    async with aiohttp.ClientSession() as session:
+        news = await collect_news(session)
+
+    if not news:
+        await interaction.followup.send('⚠️ Nenhuma notícia foi encontrada. Confira os logs do Railway.', ephemeral=True)
+        return
+
+    # Uma notícia de cada jogo, quando disponível.
+    sent = 0
+    for source in NEWS_SOURCES:
+        item = next((x for x in news if x['source']['game'] == source['game']), None)
+        if item:
+            await publish_news(channel, item)
+            sent += 1
+            await asyncio.sleep(1)
+
+    await interaction.followup.send(f'✅ Teste concluído: {sent} notícia(s) publicada(s) em {channel.mention}.', ephemeral=True)
+
+
+@bot.tree.command(name='testar-promocoes', description='Testa jogos grátis da Epic e promoções da Steam com 50% ou mais.')
+@app_commands.checks.has_permissions(administrator=True)
+async def testar_promocoes(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message('Use este comando dentro do servidor.', ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    channel = discord.utils.get(interaction.guild.text_channels, name='📢・avisos')
+    if channel is None:
+        await interaction.followup.send('Não encontrei o canal 📢・avisos.', ephemeral=True)
+        return
+
+    async with aiohttp.ClientSession() as session:
+        epic, steam = await collect_promos(session)
+
+    sent_epic = 0
+    sent_steam = 0
+
+    for item in epic[:3]:
+        await publish_epic(channel, item)
+        sent_epic += 1
+        await asyncio.sleep(1)
+
+    for item in steam[:5]:
+        await publish_steam(channel, item)
+        sent_steam += 1
+        await asyncio.sleep(1)
+
+    await interaction.followup.send(
+        f'✅ Teste concluído: Epic {sent_epic} | Steam {sent_steam}.',
+        ephemeral=True
+    )
 
 
 @bot.event
@@ -300,7 +622,7 @@ async def on_ready():
         print(f'Aviso ao limpar comandos globais: {e}')
     print(f'Total de comandos sincronizados localmente: {total}')
     print(f'Bot online como {bot.user}')
-    print('Comandos: /montar-servidor, /configurar-cargos e /finalizar-servidor')
+    print('Comandos: /montar-servidor, /configurar-cargos, /finalizar-servidor, /testar-noticias e /testar-promocoes')
 
 @bot.tree.command(name='montar-servidor', description='Cria a estrutura gamer aprovada no servidor.')
 @app_commands.checks.has_permissions(administrator=True)
@@ -470,6 +792,8 @@ async def command_error(interaction: discord.Interaction, error: app_commands.Ap
 montar_servidor.error(command_error)
 configurar_cargos.error(command_error)
 finalizar_servidor.error(command_error)
+testar_noticias.error(command_error)
+testar_promocoes.error(command_error)
 
 if __name__ == '__main__':
     print('=== goKenn Server Bot - Railway ===')
