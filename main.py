@@ -184,11 +184,19 @@ def _clean_text(value: str) -> str:
 
 
 def _interesting(title: str, source: dict) -> bool:
-    low = title.casefold()
+    low = title.casefold().strip()
     if any(word.casefold() in low for word in source['exclude']):
+        return False
+    generic = {
+        'temporada', 'season', 'notícias', 'news', 'novidades',
+        'atualização', 'update', 'evento', 'event', 'comunidade', 'community'
+    }
+    if low in generic or len(title.strip()) < 12:
         return False
     if source['game'] == 'WARZONE':
         return 'warzone' in low
+    if source['game'] == 'BATTLEFIELD 6':
+        return ('battlefield' in low or 'bf6' in low)
     return any(word.casefold() in low for word in source['include'])
 
 
@@ -838,16 +846,11 @@ class ConfirmClearAvisos(discord.ui.View):
             if len(messages) < 100:
                 break
 
-        # Reseta a memória desta execução para que o sistema recomece limpo.
-        global _news_initialized, _promos_initialized, _seen_news_urls, _seen_promo_ids
-        _news_initialized = False
-        _promos_initialized = False
-        _seen_news_urls.clear()
-        _seen_promo_ids.clear()
-
+        # Importante: não apagamos a memória de itens já conhecidos.
+        # Assim, notícias/promos antigas não voltam imediatamente após a limpeza.
         await interaction.followup.send(
             f'✅ Canal 📢・avisos limpo. {deleted} mensagem(ns) removida(s). '
-            'O monitor automático continuará verificando notícias e promoções normalmente.',
+            'As notícias e promoções já conhecidas foram preservadas na memória para não serem republicadas.',
             ephemeral=True
         )
 
