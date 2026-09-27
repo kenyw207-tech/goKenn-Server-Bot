@@ -647,7 +647,7 @@ async def on_ready():
         print(f'Aviso ao limpar comandos globais: {e}')
     print(f'Total de comandos sincronizados localmente: {total}')
     print(f'Bot online como {bot.user}')
-    print('Comandos: /montar-servidor, /configurar-cargos, /finalizar-servidor, /testar-noticias e /testar-promocoes')
+    print('Comandos: /montar-servidor, /configurar-cargos, /finalizar-servidor, /testar-noticias, /testar-promocoes e /limpar-avisos')
 
 @bot.tree.command(name='montar-servidor', description='Cria a estrutura gamer aprovada no servidor.')
 @app_commands.checks.has_permissions(administrator=True)
@@ -804,6 +804,82 @@ async def finalizar_servidor(interaction: discord.Interaction):
         ephemeral=True
     )
 
+class ConfirmClearAvisos(discord.ui.View):
+    def __init__(self, requester_id: int):
+        super().__init__(timeout=30)
+        self.requester_id = requester_id
+
+    @discord.ui.button(label='Confirmar limpeza', style=discord.ButtonStyle.danger, emoji='🗑️')
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message('Somente quem executou o comando pode confirmar.', ephemeral=True)
+            return
+
+        channel = discord.utils.get(interaction.guild.text_channels, name='📢・avisos') if interaction.guild else None
+        if channel is None:
+            await interaction.response.edit_message(content='❌ Não encontrei o canal 📢・avisos.', view=None)
+            return
+
+        await interaction.response.edit_message(content='🧹 Limpando o canal 📢・avisos...', view=None)
+        deleted = 0
+        while True:
+            messages = [m async for m in channel.history(limit=100)]
+            if not messages:
+                break
+            for message in messages:
+                try:
+                    await message.delete()
+                    deleted += 1
+                    await asyncio.sleep(0.35)
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+                except discord.HTTPException:
+                    await asyncio.sleep(1)
+            if len(messages) < 100:
+                break
+
+        # Reseta a memória desta execução para que o sistema recomece limpo.
+        global _news_initialized, _promos_initialized, _seen_news_urls, _seen_promo_ids
+        _news_initialized = False
+        _promos_initialized = False
+        _seen_news_urls.clear()
+        _seen_promo_ids.clear()
+
+        await interaction.followup.send(
+            f'✅ Canal 📢・avisos limpo. {deleted} mensagem(ns) removida(s). '
+            'O monitor automático continuará verificando notícias e promoções normalmente.',
+            ephemeral=True
+        )
+
+    @discord.ui.button(label='Cancelar', style=discord.ButtonStyle.secondary, emoji='✖️')
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message('Somente quem executou o comando pode cancelar.', ephemeral=True)
+            return
+        await interaction.response.edit_message(content='❎ Limpeza cancelada.', view=None)
+
+
+@bot.tree.command(name='limpar-avisos', description='Apaga as mensagens do canal de avisos após confirmação.')
+@app_commands.checks.has_permissions(administrator=True)
+async def limpar_avisos(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message('Use este comando dentro do servidor.', ephemeral=True)
+        return
+
+    channel = discord.utils.get(interaction.guild.text_channels, name='📢・avisos')
+    if channel is None:
+        await interaction.response.send_message('Não encontrei o canal 📢・avisos.', ephemeral=True)
+        return
+
+    view = ConfirmClearAvisos(interaction.user.id)
+    await interaction.response.send_message(
+        f'⚠️ Você está prestes a apagar **todas as mensagens** de {channel.mention}.\n'
+        'Essa ação não pode ser desfeita. Deseja continuar?',
+        view=view,
+        ephemeral=True
+    )
+
+
 async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         msg = 'Você precisa ter permissão de Administrador para usar este comando.'
@@ -819,6 +895,7 @@ configurar_cargos.error(command_error)
 finalizar_servidor.error(command_error)
 testar_noticias.error(command_error)
 testar_promocoes.error(command_error)
+limpar_avisos.error(command_error)
 
 if __name__ == '__main__':
     print('=== goKenn Server Bot - Railway ===')
