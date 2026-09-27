@@ -1,7 +1,12 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
+import asyncio
+from urllib.parse import urljoin
+
+import aiohttp
+from bs4 import BeautifulSoup
 
 intents = discord.Intents.default()
 intents.members = True
@@ -120,8 +125,161 @@ async def on_member_join(member: discord.Member):
         except discord.Forbidden:
             pass
 
+
+
+NEWS_SOURCES = [
+    {
+        'game': 'WARZONE',
+        'emoji': '🪖',
+        'url': 'https://www.callofduty.com/br/pt/blog/warzone',
+        'base': 'https://www.callofduty.com',
+        'path_hint': '/blog/',
+        'include': ('warzone', 'temporada', 'season', 'patch', 'atualiza', 'evento', 'event', 'mapa', 'mode', 'modo'),
+        'exclude': ('mobile', 'esports', 'endowment'),
+        'color': 0x43B581,
+    },
+    {
+        'game': 'ROCKET LEAGUE',
+        'emoji': '🚗',
+        'url': 'https://www.rocketleague.com/news?lang=pt-br',
+        'base': 'https://www.rocketleague.com',
+        'path_hint': '/news/',
+        'include': ('patch', 'temporada', 'season', 'atualiza', 'update', 'evento', 'event', 'chega', 'novo', 'nova'),
+        'exclude': ('rlcs', 'championship', 'major', 'world championship', 'esports'),
+        'color': 0x3498DB,
+    },
+    {
+        'game': 'BATTLEFIELD 6',
+        'emoji': '🎖️',
+        'url': 'https://www.ea.com/pt-br/games/battlefield/battlefield-6/news',
+        'base': 'https://www.ea.com',
+        'path_hint': '/games/battlefield/battlefield-6/news/',
+        'include': ('battlefield 6', 'temporada', 'season', 'atualiza', 'update', 'evento', 'event', 'mapa', 'map', 'community'),
+        'exclude': ('antitrapaça', 'anticheat', 'competitive', 'redsec competitivo'),
+        'color': 0xE67E22,
+    },
+]
+
+_news_initialized = False
+_seen_news_urls = set()
+
+
+def _clean_text(value: str) -> str:
+    return ' '.join((value or '').split()).strip()
+
+
+def _interesting(title: str, source: dict) -> bool:
+    low = title.casefold()
+    if any(word.casefold() in low for word in source['exclude']):
+        return False
+    return any(word.casefold() in low for word in source['include'])
+
+
+async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
+    headers = {'User-Agent': 'Mozilla/5.0 goKenn-Discord-NewsBot/1.0'}
+    async with session.get(source['url'], headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as response:
+        response.raise_for_status()
+        html = await response.text()
+
+    soup = BeautifulSoup(html, 'html.parser')
+    found = []
+    used = set()
+    for a in soup.find_all('a', href=True):
+        title = _clean_text(a.get_text(' ', strip=True))
+        href = urljoin(source['base'], a.get('href', ''))
+        if not title or source['path_hint'] not in href:
+            continue
+        if href.rstrip('/') == source['url'].split('?')[0].rstrip('/'):
+            continue
+        if not _interesting(title, source):
+            continue
+        # Evita cards/links duplicados da mesma matéria.
+        href = href.split('?')[0].split('#')[0]
+        if href in used:
+            continue
+        used.add(href)
+        found.append({'title': title[:250], 'url': href, 'source': source})
+        if len(found) >= 8:
+            break
+    return found
+
+
+async def recent_news_urls(channel: discord.TextChannel):
+    urls = set()
+    try:
+        async for message in channel.history(limit=100):
+            if message.author.id != bot.user.id:
+                continue
+            for embed in message.embeds:
+                if embed.url:
+                    urls.add(embed.url)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    return urls
+
+
+async def publish_news(channel: discord.TextChannel, item: dict):
+    source = item['source']
+    embed = discord.Embed(
+        title=f"{source['emoji']} {source['game']} | NOVIDADE",
+        description=f"**{item['title']}**\n\nClique no título abaixo para abrir a publicação oficial.",
+        url=item['url'],
+        color=source['color'],
+    )
+    embed.add_field(name='🔗 Fonte oficial', value=f"[Abrir publicação]({item['url']})", inline=False)
+    embed.set_footer(text='Cod Warzone Tieki • Notícias oficiais • Sem menções')
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+@tasks.loop(hours=6)
+async def game_news_loop():
+    global _news_initialized, _seen_news_urls
+    if not bot.guilds:
+        return
+
+    async with aiohttp.ClientSession() as session:
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name='📢・avisos')
+            if channel is None:
+                continue
+
+            already_posted = await recent_news_urls(channel)
+            current = []
+            for source in NEWS_SOURCES:
+                try:
+                    current.extend(await fetch_source_news(session, source))
+                except Exception as exc:
+                    print(f"[NOTÍCIAS] Falha em {source['game']}: {exc}")
+
+            # Na primeira execução de uma instalação sem notícias do bot,
+            # apenas registra o conteúdo atual para não despejar notícias antigas.
+            if not _news_initialized and not already_posted:
+                _seen_news_urls.update(item['url'] for item in current)
+                continue
+
+            # Publica no máximo 3 novidades por ciclo, da ordem mais antiga para a mais nova.
+            pending = [item for item in current if item['url'] not in already_posted and item['url'] not in _seen_news_urls]
+            for item in reversed(pending[:3]):
+                try:
+                    await publish_news(channel, item)
+                    _seen_news_urls.add(item['url'])
+                    await asyncio.sleep(2)
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    print(f"[NOTÍCIAS] Não consegui publicar: {exc}")
+
+    _news_initialized = True
+
+
+@game_news_loop.before_loop
+async def before_game_news_loop():
+    await bot.wait_until_ready()
+    await asyncio.sleep(10)
+
+
 @bot.event
 async def on_ready():
+    if not game_news_loop.is_running():
+        game_news_loop.start()
     bot.add_view(GameRoleView())
     total = 0
     # Registra os comandos diretamente em cada servidor para aparecerem imediatamente.
