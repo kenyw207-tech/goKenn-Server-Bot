@@ -20,9 +20,32 @@ ROLE_SPECS = [
     ('👑 Founder', discord.Permissions(administrator=True), discord.Colour.gold()),
     ('🛡️ Administrador', discord.Permissions(administrator=True), discord.Colour.red()),
     ('🎮 Membro', discord.Permissions.none(), discord.Colour.light_grey()),
-    ('🚗 Rocket League', discord.Permissions.none(), discord.Colour.blue()),
-    ('🪖 Warzone', discord.Permissions.none(), discord.Colour.green()),
-    ('🎖️ Battlefield', discord.Permissions.none(), discord.Colour.orange()),
+]
+
+# Estes cargos servem apenas para identificar os jogos de cada membro.
+# Nenhum canal novo é criado para estes jogos.
+GAMES = [
+    ('🚗', 'Rocket League', '🚗 Rocket League'),
+    ('🎖️', 'Battlefield 6', '🎖️ Battlefield 6'),
+    ('⚽', 'eFootball', '⚽ eFootball'),
+    ('🎯', 'Call of Duty', '🎯 Call of Duty'),
+    ('🏗️', 'Fortnite', '🏗️ Fortnite'),
+    ('🔫', 'Modern Warfare III', '🔫 Modern Warfare III'),
+    ('🟢', 'Delta Force', '🟢 Delta Force'),
+    ('💥', 'Counter-Strike 2', '💥 Counter-Strike 2'),
+    ('☠️', 'Modern Warfare II', '☠️ Modern Warfare II'),
+    ('🪖', 'Warzone', '🪖 Warzone'),
+    ('🔺', 'VALORANT', '🔺 VALORANT'),
+    ('⚔️', 'League of Legends', '⚔️ League of Legends'),
+    ('🏎️', 'Forza Horizon 6', '🏎️ Forza Horizon 6'),
+]
+
+GAME_COLOURS = [
+    discord.Colour.blue(), discord.Colour.orange(), discord.Colour.gold(),
+    discord.Colour.dark_grey(), discord.Colour.purple(), discord.Colour.red(),
+    discord.Colour.green(), discord.Colour.orange(), discord.Colour.dark_red(),
+    discord.Colour.green(), discord.Colour.magenta(), discord.Colour.blue(),
+    discord.Colour.teal(),
 ]
 
 async def toggle_game_role(interaction: discord.Interaction, role_name: str):
@@ -31,7 +54,7 @@ async def toggle_game_role(interaction: discord.Interaction, role_name: str):
         return
     role = discord.utils.get(interaction.guild.roles, name=role_name)
     if role is None:
-        await interaction.response.send_message('Esse cargo ainda não existe.', ephemeral=True)
+        await interaction.response.send_message('Esse cargo ainda não existe. Um administrador precisa executar /configurar-cargos.', ephemeral=True)
         return
     try:
         if role in interaction.user.roles:
@@ -43,34 +66,57 @@ async def toggle_game_role(interaction: discord.Interaction, role_name: str):
     except discord.Forbidden:
         await interaction.response.send_message('Não consegui alterar o cargo. Coloque o cargo do goKenn Server Bot acima dos cargos de jogos.', ephemeral=True)
 
+class GameButton(discord.ui.Button):
+    def __init__(self, emoji: str, label: str, role_name: str, index: int):
+        super().__init__(
+            label=label,
+            emoji=emoji,
+            style=discord.ButtonStyle.primary,
+            custom_id=f'game_role:v6:{index}',
+            row=index // 5,
+        )
+        self.role_name = role_name
+
+    async def callback(self, interaction: discord.Interaction):
+        await toggle_game_role(interaction, self.role_name)
+
 class GameRoleView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-
-    @discord.ui.button(label='Rocket League', emoji='🚗', style=discord.ButtonStyle.primary, custom_id='game_role:rocket')
-    async def rocket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await toggle_game_role(interaction, '🚗 Rocket League')
-
-    @discord.ui.button(label='Warzone', emoji='🪖', style=discord.ButtonStyle.primary, custom_id='game_role:warzone')
-    async def warzone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await toggle_game_role(interaction, '🪖 Warzone')
-
-    @discord.ui.button(label='Battlefield', emoji='🎖️', style=discord.ButtonStyle.primary, custom_id='game_role:battlefield')
-    async def battlefield(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await toggle_game_role(interaction, '🎖️ Battlefield')
+        for index, (emoji, label, role_name) in enumerate(GAMES):
+            self.add_item(GameButton(emoji, label, role_name, index))
 
 @bot.event
 async def on_member_join(member: discord.Member):
+    # Cargo automático de membro.
     role = discord.utils.get(member.guild.roles, name='🎮 Membro')
     if role:
         try:
             await member.add_roles(role, reason='Cargo automático de membro')
         except discord.Forbidden:
             pass
+
+    # Boas-vindas em embed no chat-geral.
     channel = discord.utils.get(member.guild.text_channels, name='💬・chat-geral')
+    escolha = discord.utils.get(member.guild.text_channels, name='🎭・escolha-seus-jogos')
     if channel:
         try:
-            await channel.send(f'👋 Bem-vindo(a), {member.mention}! Escolha seus jogos em <#{discord.utils.get(member.guild.text_channels, name="🎭・escolha-seus-jogos").id}>' if discord.utils.get(member.guild.text_channels, name='🎭・escolha-seus-jogos') else f'👋 Bem-vindo(a), {member.mention}!')
+            destino = escolha.mention if escolha else '#escolha-seus-jogos'
+            embed = discord.Embed(
+                title='👋 Bem-vindo(a) ao Cod Warzone Tieki!',
+                description=(
+                    f'Fala, {member.mention}! 🎮\n\n'
+                    'Seja muito bem-vindo(a) à nossa comunidade!\n\n'
+                    f'🎭 Vá até {destino} e selecione os jogos que você joga.\n\n'
+                    'Escolha quantos jogos quiser e mostre para a galera o que você joga.\n\n'
+                    '🎮 O cargo **Membro** já foi adicionado automaticamente.\n\n'
+                    '**Entre em uma call, conheça a galera e bora jogar! 🔥**'
+                ),
+                color=discord.Color.red()
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f'Agora somos {member.guild.member_count} membros • Cod Warzone Tieki')
+            await channel.send(content=member.mention, embed=embed)
         except discord.Forbidden:
             pass
 
@@ -146,6 +192,19 @@ async def configurar_cargos(interaction: discord.Interaction):
             except discord.Forbidden:
                 pass
 
+    # Cria/atualiza os cargos de identificação dos jogos, sem criar canais.
+    for index, (_, _, role_name) in enumerate(GAMES):
+        role = discord.utils.get(guild.roles, name=role_name)
+        colour = GAME_COLOURS[index]
+        if role is None:
+            await guild.create_role(name=role_name, permissions=discord.Permissions.none(), colour=colour, reason='Cargo de identificação de jogo')
+            created.append(role_name)
+        else:
+            try:
+                await role.edit(permissions=discord.Permissions.none(), colour=colour, reason='Atualização de cargo de jogo')
+            except discord.Forbidden:
+                pass
+
     founder = discord.utils.get(guild.roles, name='👑 Founder')
     if founder and founder not in interaction.user.roles:
         try:
@@ -158,10 +217,16 @@ async def configurar_cargos(interaction: discord.Interaction):
         await interaction.followup.send('Cargos criados, mas não encontrei o canal 🎭・escolha-seus-jogos.', ephemeral=True)
         return
 
-    embed = discord.Embed(title='🎮 Escolha seus jogos', description='Clique nos botões para adicionar ou remover seus cargos. Você pode escolher mais de um jogo.')
-    embed.add_field(name='🚗 Rocket League', value='Receba o cargo de Rocket League.', inline=False)
-    embed.add_field(name='🪖 Warzone', value='Receba o cargo de Warzone.', inline=False)
-    embed.add_field(name='🎖️ Battlefield', value='Receba o cargo de Battlefield.', inline=False)
+    jogos_texto = '\n'.join(f'{emoji} **{label}**' for emoji, label, _ in GAMES)
+    embed = discord.Embed(
+        title='🎮 Escolha seus jogos',
+        description=(
+            'Clique nos botões para adicionar ou remover seus cargos. '
+            'Você pode escolher quantos jogos quiser.\n\n' + jogos_texto
+        ),
+        color=discord.Color.red()
+    )
+    embed.set_footer(text='Esses cargos servem apenas para mostrar quais jogos você joga.')
     await channel.send(embed=embed, view=GameRoleView())
     await interaction.followup.send(f'✅ Cargos configurados. Novos cargos: {len(created)}. Painel publicado em {channel.mention}.', ephemeral=True)
 
@@ -182,6 +247,18 @@ async def finalizar_servidor(interaction: discord.Interaction):
         else:
             try:
                 await role.edit(permissions=permissions, colour=colour, reason='Finalização do servidor')
+            except discord.Forbidden:
+                pass
+
+    # Garante que todos os cargos de jogos existam, sem criar canais adicionais.
+    for index, (_, _, role_name) in enumerate(GAMES):
+        role = discord.utils.get(guild.roles, name=role_name)
+        colour = GAME_COLOURS[index]
+        if role is None:
+            await guild.create_role(name=role_name, permissions=discord.Permissions.none(), colour=colour, reason='Finalização dos cargos de jogos')
+        else:
+            try:
+                await role.edit(permissions=discord.Permissions.none(), colour=colour, reason='Finalização dos cargos de jogos')
             except discord.Forbidden:
                 pass
 
