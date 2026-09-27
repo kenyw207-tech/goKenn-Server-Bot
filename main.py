@@ -187,6 +187,8 @@ def _interesting(title: str, source: dict) -> bool:
     low = title.casefold()
     if any(word.casefold() in low for word in source['exclude']):
         return False
+    if source['game'] == 'WARZONE':
+        return 'warzone' in low
     return any(word.casefold() in low for word in source['include'])
 
 
@@ -225,7 +227,16 @@ async def _fetch_google_news_fallback(session: aiohttp.ClientSession, source: di
         href = _clean_text(link_tag.get_text(' ', strip=True))
         if not title or not href or href in used:
             continue
-        if not _interesting(title, source):
+        # Google News costuma anexar o nome da fonte ao título.
+        for suffix in (' - Electronic Arts', ' - EA', ' - Rocket League', ' - Call of Duty'):
+            if title.endswith(suffix):
+                title = title[:-len(suffix)].strip()
+        if len(title) < 12 or title.casefold() in {'temporada', 'season', 'update', 'atualização'}:
+            continue
+        if source['game'] == 'ROCKET LEAGUE':
+            # A busca já é restrita ao domínio oficial; aceita títulos completos do feed.
+            pass
+        elif not _interesting(title, source):
             continue
         used.add(href)
         found.append({'title': title[:250], 'url': href, 'source': source})
@@ -251,7 +262,9 @@ async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
         found = []
         used = set()
         for a in soup.find_all('a', href=True):
-            title = _clean_text(a.get_text(' ', strip=True))
+            title = _clean_text(
+                a.get('aria-label') or a.get('title') or a.get_text(' ', strip=True)
+            )
             href = urljoin(source['base'], a.get('href', ''))
             if not title or source['path_hint'] not in href:
                 continue
@@ -415,7 +428,14 @@ async def fetch_steam_specials(session: aiohttp.ClientSession):
 async def publish_epic(channel: discord.TextChannel, item: dict):
     description = f"**{item['title']}**\n\n💰 **GRÁTIS por tempo limitado**"
     if item.get('end'):
-        description += f"\n⏰ Término informado pela Epic: `{item['end']}`"
+        try:
+            from datetime import datetime, timedelta, timezone
+            end_dt = datetime.fromisoformat(item['end'].replace('Z', '+00:00'))
+            br_tz = timezone(timedelta(hours=-3))
+            end_dt = end_dt.astimezone(br_tz)
+            description += f"\n⏰ Grátis até **{end_dt.strftime('%d/%m/%Y às %H:%M')}**"
+        except Exception:
+            description += f"\n⏰ Término informado pela Epic: `{item['end']}`"
     embed = discord.Embed(
         title='🎁 EPIC GAMES | JOGO GRÁTIS',
         description=description,
@@ -561,7 +581,12 @@ async def testar_noticias(interaction: discord.Interaction):
             sent += 1
             await asyncio.sleep(1)
 
-    await interaction.followup.send(f'✅ Teste concluído: {sent} notícia(s) publicada(s) em {channel.mention}.', ephemeral=True)
+    missing = [src['game'] for src in NEWS_SOURCES if not any(x['source']['game'] == src['game'] for x in news)]
+    extra = f" Sem resultado: {', '.join(missing)}." if missing else ''
+    await interaction.followup.send(
+        f'✅ Teste concluído: {sent} notícia(s) publicada(s) em {channel.mention}.{extra}',
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name='testar-promocoes', description='Testa jogos grátis da Epic e promoções da Steam com 50% ou mais.')
