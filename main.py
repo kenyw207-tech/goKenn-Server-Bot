@@ -289,6 +289,43 @@ async def _fetch_google_news_fallback(session: aiohttp.ClientSession, source: di
     return found
 
 
+async def _fetch_rocket_bing_fallback(session: aiohttp.ClientSession, source: dict):
+    """Segundo fallback do Rocket League via Bing News RSS, restrito ao site oficial."""
+    from urllib.parse import quote_plus
+    query = quote_plus('site:rocketleague.com/news "Rocket League"')
+    url = f'https://www.bing.com/news/search?q={query}&format=rss'
+    headers = _browser_headers()
+    try:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as response:
+            response.raise_for_status()
+            xml = await response.text()
+    except Exception as exc:
+        print(f"[NOTÍCIAS] Fallback Bing do Rocket League falhou: {exc}")
+        return []
+
+    soup = BeautifulSoup(xml, 'html.parser')
+    found, used = [], set()
+    for item in soup.find_all('item'):
+        title_tag = item.find('title')
+        link_tag = item.find('link')
+        if not title_tag or not link_tag:
+            continue
+        title = _clean_text(title_tag.get_text(' ', strip=True))
+        href = _clean_text(link_tag.get_text(' ', strip=True))
+        if not title or not href or href in used:
+            continue
+        if 'rocket league' not in title.casefold():
+            continue
+        low = title.casefold()
+        if any(x in low for x in ('rlcs', 'championship', 'major', 'world championship', 'esports')):
+            continue
+        used.add(href)
+        found.append({'title': title[:250], 'url': href, 'source': source})
+        if len(found) >= 8:
+            break
+    return found
+
+
 async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
     """Tenta a página oficial; se houver 403/erro, usa fallback restrito ao domínio oficial."""
     headers = _browser_headers()
@@ -317,7 +354,7 @@ async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
             if source['game'] == 'ROCKET LEAGUE':
                 rocket_ok = (
                     'rocket league' in title.casefold()
-                    or 'rocketleague.com' in link.casefold()
+                    or 'rocketleague.com' in href.casefold()
                 )
                 if not rocket_ok:
                     continue
@@ -335,7 +372,11 @@ async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
     except Exception as exc:
         print(f"[NOTÍCIAS] Página direta falhou em {source['game']}: {exc}. Tentando fallback.")
 
-    return await _fetch_google_news_fallback(session, source)
+    fallback = await _fetch_google_news_fallback(session, source)
+    if source['game'] == 'ROCKET LEAGUE' and not fallback:
+        print('[NOTÍCIAS] Rocket League sem resultados no Google RSS. Tentando Bing RSS.')
+        fallback = await _fetch_rocket_bing_fallback(session, source)
+    return fallback
 
 
 async def recent_news_urls(channel: discord.TextChannel):
@@ -902,21 +943,26 @@ class ConfirmClearAvisos(discord.ui.View):
 
         await interaction.response.edit_message(content='🧹 Limpando o canal 📢・avisos...', view=None)
         deleted = 0
-        while True:
-            messages = [m async for m in channel.history(limit=100)]
-            if not messages:
-                break
-            for message in messages:
-                try:
-                    await message.delete()
-                    deleted += 1
-                    await asyncio.sleep(0.35)
-                except (discord.NotFound, discord.Forbidden):
-                    pass
-                except discord.HTTPException:
-                    await asyncio.sleep(1)
-            if len(messages) < 100:
-                break
+        try:
+            removed = await channel.purge(
+                limit=None,
+                bulk=True,
+                reason='Limpeza do canal de avisos pelo goKenn Server Bot'
+            )
+            deleted = len(removed)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                '❌ O bot não tem permissão para apagar mensagens nesse canal.',
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException as exc:
+            print(f'[LIMPEZA] Discord limitou/falhou durante a limpeza: {exc}')
+            await interaction.followup.send(
+                f'⚠️ A limpeza foi interrompida pelo Discord após {deleted} mensagem(ns). Tente novamente em alguns segundos.',
+                ephemeral=True
+            )
+            return
 
         # Importante: não apagamos a memória de itens já conhecidos.
         # Assim, notícias/promos antigas não voltam imediatamente após a limpeza.
