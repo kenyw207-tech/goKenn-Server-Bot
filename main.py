@@ -314,7 +314,14 @@ async def fetch_source_news(session: aiohttp.ClientSession, source: dict):
                 continue
             if href.rstrip('/') == source['url'].split('?')[0].rstrip('/'):
                 continue
-            if not _interesting(title, source):
+            if source['game'] == 'ROCKET LEAGUE':
+                rocket_ok = (
+                    'rocket league' in title.casefold()
+                    or 'rocketleague.com' in link.casefold()
+                )
+                if not rocket_ok:
+                    continue
+            elif not _interesting(title, source):
                 continue
             href = href.split('?')[0].split('#')[0]
             if href in used:
