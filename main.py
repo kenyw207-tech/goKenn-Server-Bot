@@ -6,7 +6,11 @@ import asyncio
 from urllib.parse import urljoin
 
 import aiohttp
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+
+warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
+import json
+import warnings
 
 intents = discord.Intents.default()
 intents.members = True
